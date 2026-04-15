@@ -87,13 +87,21 @@ def annotate(
     table.add_column("Cell Type", style="bold")
     table.add_column("Conf.", justify="right")
     table.add_column("Key Markers")
+    table.add_column("DB Support")
 
     for ann in sorted(result.annotations, key=lambda a: _sort_key(a.cluster_id)):
+        db_support = ann.database_support or ""
+        if ann.database_markers_matched is not None and ann.database_markers_total:
+            db_support = (
+                f"{ann.database_markers_matched}/{ann.database_markers_total} matched"
+                + (f" — {db_support}" if db_support else "")
+            )
         table.add_row(
             ann.cluster_id,
             ann.predicted_type,
             f"{ann.confidence:.2f}",
             ", ".join(ann.markers_used[:4]),
+            db_support,
         )
 
     console.print(table)

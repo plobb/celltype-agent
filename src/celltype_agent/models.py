@@ -20,6 +20,18 @@ class CellTypeAnnotation(BaseModel):
     reasoning: str = Field(
         description="Step-by-step reasoning for the cell type assignment"
     )
+    database_support: Optional[str] = Field(
+        default=None,
+        description="Summary of which databases agreed or disagreed with the annotation",
+    )
+    database_markers_matched: Optional[int] = Field(
+        default=None,
+        description="Number of cluster markers found in database results",
+    )
+    database_markers_total: Optional[int] = Field(
+        default=None,
+        description="Total number of cluster markers checked against databases",
+    )
 
     @field_validator("predicted_type")
     @classmethod
