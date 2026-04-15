@@ -3,7 +3,11 @@
     "allow": [
       "Bash(python3 *)",
       "Bash(.venv/bin/python *)",
-      "Bash(.venv/bin/pytest *)"
+      "Bash(.venv/bin/pytest *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(.venv/bin/jupytext *)"
     ]
   }
 }
