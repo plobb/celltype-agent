@@ -15,8 +15,14 @@ app = typer.Typer(
     name="celltype-agent",
     help="Automated cell type annotation powered by Claude.",
     add_completion=False,
+    no_args_is_help=True,
 )
 console = Console()
+
+
+@app.callback()
+def _root() -> None:
+    """celltype-agent — Claude-powered single-cell annotation."""
 
 
 def _setup_logging(verbose: bool) -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from .agent import annotate_clusters
 from .markers import extract_markers
@@ -24,6 +24,7 @@ def annotate(
     model: str = "claude-opus-4-6",
     add_to_obs: bool = True,
     obs_key: str = "cell_type",
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> AnnotationResult:
     """Annotate cell clusters in *adata* using Claude.
 
@@ -65,19 +66,24 @@ def annotate(
     >>> result = annotate(adata, species="human", tissue="PBMC")
     >>> print(result.to_labels())
     """
+    def _progress(msg: str) -> None:
+        log.info(msg)
+        if progress_callback is not None:
+            progress_callback(msg)
+
     species = species.lower().strip()
     if species not in {"human", "mouse"}:
         raise ValueError(f"species must be 'human' or 'mouse', got '{species}'")
 
     # --- 1. Extract markers ---------------------------------------------------
-    log.info("Extracting top %d markers per cluster (key='%s') …", n_markers, cluster_key)
+    _progress(f"Extracting top {n_markers} markers per cluster (key='{cluster_key}') …")
     markers = extract_markers(
         adata,
         cluster_key=cluster_key,
         n_markers=n_markers,
         method=method,
     )
-    log.info("Found %d clusters.", len(markers))
+    _progress(f"Found {len(markers)} clusters. Sending to {model} for annotation …")
 
     # --- 2. Call the agent ---------------------------------------------------
     annotations: list[CellTypeAnnotation] = annotate_clusters(
@@ -87,6 +93,7 @@ def annotate(
         api_key=api_key,
         model=model,
     )
+    _progress(f"Annotation complete — {len(annotations)} cluster(s) annotated.")
 
     result = AnnotationResult(
         annotations=annotations,
