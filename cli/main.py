@@ -9,6 +9,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.panel import Panel
 from rich.table import Table
 
 app = typer.Typer(
@@ -52,6 +53,7 @@ def annotate(
         "cell_type", "--obs-key", help="adata.obs column for cell type labels."
     ),
     model: str = typer.Option("claude-opus-4-6", "--model", help="Claude model to use."),
+    report: bool = typer.Option(False, "--report", "-r", help="Print narrative and methods sections after the table."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Annotate cell clusters in an AnnData file and print results."""
@@ -111,6 +113,12 @@ def annotate(
         )
 
     console.print(table)
+
+    if report:
+        with console.status("Generating narrative summary …"):
+            narrative = result.to_narrative()
+        console.print(Panel(narrative, title="[bold cyan]Narrative Summary[/bold cyan]", border_style="cyan"))
+        console.print(Panel(result.to_methods(), title="[bold cyan]Methods[/bold cyan]", border_style="cyan"))
 
     if output:
         adata.write_h5ad(output)

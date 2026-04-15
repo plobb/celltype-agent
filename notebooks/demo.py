@@ -97,3 +97,23 @@ sc.pl.umap(
     frameon=False,
     title=["Louvain cluster", "Predicted cell type"],
 )
+
+# %% [markdown]
+# ## 8. Narrative summary
+#
+# `to_narrative()` calls Claude to write a publication-ready prose summary of the
+# annotations — grouping cell types logically, noting database concordance, and
+# flagging any low-confidence calls.
+
+# %%
+narrative = result.to_narrative()
+print(narrative)
+
+# %% [markdown]
+# ## 9. Methods paragraph
+#
+# `to_methods()` generates a ready-to-paste methods section from the run metadata —
+# no API call needed.
+
+# %%
+print(result.to_methods())

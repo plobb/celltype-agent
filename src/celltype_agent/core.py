@@ -100,6 +100,7 @@ def annotate(
         species=species,
         tissue=tissue,
         n_clusters=len(markers),
+        n_markers=n_markers,
         model_used=model,
     )
 

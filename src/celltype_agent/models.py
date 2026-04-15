@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -52,6 +53,7 @@ class AnnotationResult(BaseModel):
     species: str
     tissue: Optional[str] = None
     n_clusters: int
+    n_markers: int = 10
     model_used: str = "claude-opus-4-6"
 
     def as_dict(self) -> dict[str, CellTypeAnnotation]:
@@ -90,6 +92,83 @@ class AnnotationResult(BaseModel):
     def to_csv(self, path: Union[str, Path]) -> None:
         """Write annotations to *path* as a CSV file."""
         self.to_dataframe().to_csv(path, index=False)
+
+    # ------------------------------------------------------------------
+    # Narrative / methods generation
+    # ------------------------------------------------------------------
+
+    def to_narrative(self, api_key: Optional[str] = None) -> str:
+        """Generate a publication-ready narrative summary via Claude.
+
+        Sends the annotation results to the Claude API and returns a 1-2
+        paragraph prose summary suitable for pasting into a paper or report.
+        Falls back to the ``ANTHROPIC_API_KEY`` environment variable when
+        *api_key* is not supplied.
+        """
+        import anthropic  # noqa: PLC0415
+
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        client = anthropic.Anthropic(api_key=key)
+
+        ann_lines: list[str] = []
+        for ann in self._sorted_annotations():
+            db_info = ""
+            if ann.database_markers_matched is not None and ann.database_markers_total:
+                db_info = (
+                    f" (DB concordance: {ann.database_markers_matched}/"
+                    f"{ann.database_markers_total} markers matched"
+                )
+                if ann.database_support:
+                    db_info += f"; {ann.database_support}"
+                db_info += ")"
+            elif ann.database_support:
+                db_info = f" ({ann.database_support})"
+
+            conf_flag = " [LOW CONFIDENCE]" if ann.confidence < 0.6 else ""
+            ann_lines.append(
+                f"Cluster {ann.cluster_id}: {ann.predicted_type} "
+                f"(confidence={ann.confidence:.2f}{conf_flag}; "
+                f"markers: {', '.join(ann.markers_used[:5])}{db_info})"
+            )
+
+        tissue_str = f" from {self.tissue}" if self.tissue else ""
+        prompt = (
+            f"You are writing a results section for a single-cell RNA-seq paper.\n\n"
+            f"The following cell type annotations were generated automatically for a "
+            f"{self.species} dataset{tissue_str} with {self.n_clusters} clusters:\n\n"
+            + "\n".join(ann_lines)
+            + "\n\nWrite a concise, publication-ready narrative summary (1-2 paragraphs) that:\n"
+            "1. Groups related cell types logically (e.g. lymphoid lineage, myeloid lineage, "
+            "stromal/other)\n"
+            "2. Mentions database concordance where relevant\n"
+            "3. Flags any low-confidence annotations (confidence < 0.6) as requiring manual "
+            "review\n"
+            "4. Uses appropriate scientific language\n\n"
+            "Return only the narrative text, no headings or labels."
+        )
+
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
+
+    def to_methods(self) -> str:
+        """Return a ready-to-paste methods paragraph describing the annotation pipeline."""
+        from celltype_agent import __version__  # noqa: PLC0415
+
+        return (
+            f"Cell type annotation was performed using celltype-agent v{__version__} "
+            f"with {self.model_used} via the Anthropic API. "
+            f"Top {self.n_markers} differentially expressed marker genes per cluster were "
+            f"identified using the Wilcoxon rank-sum test. "
+            f"Annotations were cross-referenced against PanglaoDB (March 2020, 8,286 "
+            f"marker-gene associations) and CellMarker 2.0 (96,075 entries). "
+            f"The agent used a hypothesise-then-verify strategy: forming initial cell type "
+            f"hypotheses from marker genes, verifying against both databases, and exploring "
+            f"alternatives for clusters with low database concordance (<30% marker overlap)."
+        )
 
     # ------------------------------------------------------------------
     # Jupyter display
