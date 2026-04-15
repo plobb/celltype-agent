@@ -19,7 +19,7 @@ import anthropic
 
 from .knowledge import search_by_celltype, search_by_gene
 from .markers import format_markers_for_prompt
-from .models import CellTypeAnnotation
+from .models import CellTypeAnnotation, TopicAnnotation
 
 log = logging.getLogger(__name__)
 
@@ -140,9 +140,101 @@ _SEARCH_BY_GENE_TOOL: dict = {
 
 _ALL_TOOLS = [_SEARCH_BY_CELLTYPE_TOOL, _SEARCH_BY_GENE_TOOL, _ANNOTATE_TOOL]
 
+_RECORD_TOPIC_TOOL: dict = {
+    "name": "record_topic",
+    "description": (
+        "Record the annotation for one LDA topic. "
+        "Call this once for EACH topic in the table."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "topic_id": {
+                "type": "integer",
+                "description": "The topic index (0-based integer) exactly as shown in the table.",
+            },
+            "annotation": {
+                "type": "string",
+                "description": (
+                    "Concise label for this gene program, e.g. 'CD4+ T cell', "
+                    "'Inflammatory macrophage', 'Fibrosis program', 'Ribosomal artifact'."
+                ),
+            },
+            "category": {
+                "type": "string",
+                "enum": ["cell_type", "cell_state", "tissue_program", "technical", "ambiguous"],
+                "description": (
+                    "Broad category: 'cell_type' (specific lineage), 'cell_state' "
+                    "(activation/stress state), 'tissue_program' (ECM, angiogenesis, etc.), "
+                    "'technical' (ribosomal, mitochondrial), 'ambiguous' (cannot resolve)."
+                ),
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence in this annotation, 0.0–1.0.",
+            },
+            "key_genes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Top genes that most strongly define this topic.",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "2–4 sentence explanation citing specific genes.",
+            },
+            "database_support": {
+                "type": "string",
+                "description": (
+                    "Summary of what PanglaoDB and CellMarker confirmed or contradicted. "
+                    "Omit if no database searches were performed."
+                ),
+            },
+        },
+        "required": [
+            "topic_id",
+            "annotation",
+            "category",
+            "confidence",
+            "key_genes",
+            "reasoning",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+_TOPIC_TOOLS = [_SEARCH_BY_CELLTYPE_TOOL, _SEARCH_BY_GENE_TOOL, _RECORD_TOPIC_TOOL]
+
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
+
+_TOPIC_SYSTEM_PROMPT = """\
+You are annotating topics from LDA decomposition of Visium spatial transcriptomics data.
+
+Each topic is a gene program derived from co-expression patterns across tissue spots.
+Topics may represent:
+- A specific cell type (e.g. "T cell", "Hepatocyte")
+- A cell state or activation program (e.g. "Inflammatory macrophage", "Stressed epithelial")
+- A tissue structure program (e.g. "Extracellular matrix", "Angiogenesis")
+- A technical artifact (e.g. "Ribosomal", "Mitochondrial stress")
+- An ambiguous mixture that cannot be clearly resolved
+
+For each topic, follow this workflow:
+
+1. **Form a hypothesis** based on the top-weighted genes.
+2. **Call `search_by_celltype`** with your hypothesised cell type to verify against databases.
+3. **If fewer than 30 % of the top genes** appear in database results, call `search_by_gene`
+   on 2–3 of the most distinctive genes to explore alternatives.
+4. **Call `record_topic`** with your final annotation and the appropriate `category`.
+
+Additional guidelines
+---------------------
+* Ribosomal programs (RPS*, RPL*) and mitochondrial programs (MT-*) are usually technical.
+* ECM genes (COL*, FN1, VIM) typically indicate stromal / fibroblast programs.
+* Assign "ambiguous" and lower confidence for mixed or unresolvable gene programs.
+* Call `record_topic` EXACTLY ONCE per topic — do not skip any.
+* Do NOT call `record_topic` more than once for the same topic_id.
+"""
 
 _SYSTEM_PROMPT = """\
 You are a cell type annotation expert specialising in single-cell and spatial
@@ -344,6 +436,156 @@ def annotate_clusters(
         if missing:
             log.warning(
                 "Reached max turns (%d) with %d cluster(s) still unannotated: %s",
+                max_turns,
+                len(missing),
+                sorted(missing),
+            )
+
+    return list(annotations.values())
+
+
+def annotate_topics(
+    topic_genes: dict[int, list[tuple[str, float]]],
+    species: str = "human",
+    tissue: Optional[str] = None,
+    api_key: Optional[str] = None,
+    model: str = "claude-opus-4-6",
+) -> list[TopicAnnotation]:
+    """Query Claude to annotate LDA topics from their top-weighted genes.
+
+    Parameters
+    ----------
+    topic_genes:
+        Mapping of topic_id → list of (gene, weight) tuples, as returned by
+        :func:`~celltype_agent.deconvolution.run_lda`.
+    species:
+        Biological species (``'human'`` or ``'mouse'``).
+    tissue:
+        Optional tissue/organ context.
+    api_key:
+        Anthropic API key.  Falls back to ``ANTHROPIC_API_KEY`` env var.
+    model:
+        Claude model to use.
+
+    Returns
+    -------
+    List of :class:`~celltype_agent.models.TopicAnnotation` objects, one per topic.
+    """
+    from .deconvolution import format_topics_for_prompt  # noqa: PLC0415
+
+    client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+
+    topic_table = format_topics_for_prompt(topic_genes)
+    n_topics = len(topic_genes)
+    tissue_str = f" in {tissue}" if tissue else ""
+
+    user_message = (
+        f"Please annotate all {n_topics} LDA topic(s) from this {species} "
+        f"spatial transcriptomics dataset{tissue_str}. "
+        f"For each topic: hypothesise what it represents, verify via search_by_celltype, "
+        f"check search_by_gene if needed, then call record_topic.\n\n"
+        f"{topic_table}"
+    )
+
+    log.info("Sending %d topics to %s for annotation…", n_topics, model)
+
+    messages: list[dict] = [{"role": "user", "content": user_message}]
+    annotations: dict[int, TopicAnnotation] = {}
+
+    max_turns = 30
+    for turn in range(max_turns):
+        with client.messages.stream(
+            model=model,
+            max_tokens=16000,
+            thinking={"type": "adaptive"},
+            system=_TOPIC_SYSTEM_PROMPT,
+            tools=_TOPIC_TOOLS,
+            tool_choice={"type": "auto"},
+            messages=messages,
+        ) as stream:
+            response = stream.get_final_message()
+
+        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+        tool_results = []
+
+        for block in tool_use_blocks:
+            if block.name == "record_topic":
+                try:
+                    ann = TopicAnnotation(**block.input)
+                    annotations[ann.topic_id] = ann
+                    log.debug("Annotated topic %d → %s", ann.topic_id, ann.annotation)
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": "Recorded.",
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "Failed to parse topic annotation for block %s: %s", block.id, exc
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "is_error": True,
+                            "content": str(exc),
+                        }
+                    )
+
+            elif block.name in ("search_by_celltype", "search_by_gene"):
+                try:
+                    result_json = _dispatch_tool(block.name, block.input)
+                    log.debug("Tool %s(%s) → %s", block.name, block.input, result_json[:120])
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result_json,
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Tool %s failed: %s", block.name, exc)
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "is_error": True,
+                            "content": str(exc),
+                        }
+                    )
+
+        messages.append({"role": "assistant", "content": response.content})
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+
+        missing = set(topic_genes.keys()) - set(annotations.keys())
+        if not missing:
+            log.info("All %d topics annotated in %d turn(s).", n_topics, turn + 1)
+            break
+
+        if response.stop_reason == "end_turn" and missing:
+            if turn < max_turns - 1:
+                log.debug("Nudging Claude for remaining topics: %s", sorted(missing))
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Please also call `record_topic` for the remaining "
+                            f"topic IDs: {sorted(missing)}"
+                        ),
+                    }
+                )
+            continue
+
+        if response.stop_reason != "tool_use":
+            break
+    else:
+        missing = set(topic_genes.keys()) - set(annotations.keys())
+        if missing:
+            log.warning(
+                "Reached max turns (%d) with %d topic(s) still unannotated: %s",
                 max_turns,
                 len(missing),
                 sorted(missing),

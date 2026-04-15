@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
+from typing import Literal
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -259,6 +260,204 @@ class AnnotationResult(BaseModel):
                 return (1, ann.cluster_id)
 
         return sorted(self.annotations, key=_key)
+
+
+# ---------------------------------------------------------------------------
+# Spatial / LDA models
+# ---------------------------------------------------------------------------
+
+_CATEGORY_COLORS: dict[str, tuple[str, str]] = {
+    "cell_type":      ("#0d6efd", "#cfe2ff"),
+    "cell_state":     ("#6f42c1", "#e2d9f3"),
+    "tissue_program": ("#198754", "#d1e7dd"),
+    "technical":      ("#6c757d", "#e9ecef"),
+    "ambiguous":      ("#fd7e14", "#ffe5d0"),
+}
+
+
+class TopicAnnotation(BaseModel):
+    """Annotation for a single LDA topic."""
+
+    topic_id: int = Field(description="Topic index (0-based)")
+    annotation: str = Field(
+        description="Concise label, e.g. 'CD4+ T cell', 'Fibrosis program'"
+    )
+    category: Literal[
+        "cell_type", "cell_state", "tissue_program", "technical", "ambiguous"
+    ] = Field(description="Broad category of this gene program")
+    confidence: float = Field(ge=0.0, le=1.0, description="Confidence score 0–1")
+    key_genes: list[str] = Field(description="Top genes driving this topic")
+    reasoning: str = Field(description="2–4 sentence explanation of the annotation")
+    database_support: Optional[str] = Field(
+        default=None,
+        description="Summary of database evidence for or against this annotation",
+    )
+
+
+class DeconvolutionResult(BaseModel):
+    """Result of LDA spatial deconvolution with topic annotations."""
+
+    topics: list[TopicAnnotation] = Field(default_factory=list)
+    n_topics: int
+    spot_topic_proportions: list[list[float]] = Field(
+        description="Per-spot topic proportions, shape (n_spots, n_topics)"
+    )
+    coherence_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="Held-out perplexity per K tried during auto-K selection",
+    )
+    species: str
+    tissue: Optional[str] = None
+    model_used: str = "claude-opus-4-6"
+
+    # ------------------------------------------------------------------
+    # Data access
+    # ------------------------------------------------------------------
+
+    def as_dict(self) -> dict[int, TopicAnnotation]:
+        """Return topic_id → TopicAnnotation mapping."""
+        return {t.topic_id: t for t in self.topics}
+
+    def to_dataframe(self) -> "pd.DataFrame":
+        """Return topic annotations as a :class:`pandas.DataFrame`.
+
+        Columns: ``topic_id``, ``annotation``, ``category``, ``confidence``,
+        ``key_genes``, ``reasoning``, ``database_support``.
+        """
+        import pandas as pd  # noqa: PLC0415
+
+        rows = []
+        for t in sorted(self.topics, key=lambda x: x.topic_id):
+            rows.append(
+                {
+                    "topic_id": t.topic_id,
+                    "annotation": t.annotation,
+                    "category": t.category,
+                    "confidence": t.confidence,
+                    "key_genes": ", ".join(t.key_genes),
+                    "reasoning": t.reasoning,
+                    "database_support": t.database_support,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    def dominant_topics(self) -> list[int]:
+        """Return the dominant topic index for each spot."""
+        import numpy as np  # noqa: PLC0415
+
+        arr = np.array(self.spot_topic_proportions)
+        return arr.argmax(axis=1).tolist()
+
+    # ------------------------------------------------------------------
+    # Narrative generation
+    # ------------------------------------------------------------------
+
+    def to_narrative(self, api_key: Optional[str] = None) -> str:
+        """Generate a publication-ready narrative summary via Claude (1–2 paragraphs)."""
+        import anthropic  # noqa: PLC0415
+
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        client = anthropic.Anthropic(api_key=key)
+
+        topic_lines: list[str] = []
+        for t in sorted(self.topics, key=lambda x: x.topic_id):
+            conf_flag = " [LOW CONFIDENCE]" if t.confidence < 0.6 else ""
+            db_part = f" ({t.database_support})" if t.database_support else ""
+            topic_lines.append(
+                f"Topic {t.topic_id} [{t.category}]: {t.annotation} "
+                f"(confidence={t.confidence:.2f}{conf_flag}; "
+                f"key genes: {', '.join(t.key_genes[:5])}{db_part})"
+            )
+
+        tissue_str = f" in {self.tissue}" if self.tissue else ""
+        prompt = (
+            f"You are writing a results section for a spatial transcriptomics paper.\n\n"
+            f"LDA deconvolution of a {self.species} dataset{tissue_str} identified "
+            f"{self.n_topics} topics:\n\n"
+            + "\n".join(topic_lines)
+            + "\n\nWrite a concise, publication-ready narrative (1-2 paragraphs) that:\n"
+            "1. Groups topics by their category (cell types together, programs together, etc.)\n"
+            "2. Notes database concordance where relevant\n"
+            "3. Flags any technical artifacts or low-confidence topics\n"
+            "4. Uses appropriate scientific language\n\n"
+            "Return only the narrative text, no headings or labels."
+        )
+
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
+
+    # ------------------------------------------------------------------
+    # Jupyter display
+    # ------------------------------------------------------------------
+
+    def _repr_html_(self) -> str:
+        """Render a styled HTML table for Jupyter notebook display."""
+        context_parts = [f"<b>Species:</b> {html.escape(self.species)}"]
+        if self.tissue:
+            context_parts.append(f"<b>Tissue:</b> {html.escape(self.tissue)}")
+        context_parts.append(f"<b>Model:</b> {html.escape(self.model_used)}")
+        context_parts.append(f"<b>Topics:</b> {self.n_topics}")
+        context_line = " &nbsp;|&nbsp; ".join(context_parts)
+
+        header = (
+            "<tr>"
+            "<th>Topic</th>"
+            "<th>Annotation</th>"
+            "<th>Category</th>"
+            "<th>Confidence</th>"
+            "<th>Key Genes</th>"
+            "<th>DB Support</th>"
+            "</tr>"
+        )
+
+        rows_html = []
+        for t in sorted(self.topics, key=lambda x: x.topic_id):
+            conf_color = _confidence_color(t.confidence)
+            conf_bg = _confidence_bg(t.confidence)
+            cat_color, cat_bg = _CATEGORY_COLORS.get(t.category, ("#333", "#eee"))
+            db_cell = html.escape(t.database_support or "—")
+            genes_str = html.escape(", ".join(t.key_genes[:5]))
+
+            rows_html.append(
+                f"<tr>"
+                f'<td style="text-align:center;font-weight:bold;">{t.topic_id}</td>'
+                f'<td style="font-weight:bold;">{html.escape(t.annotation)}</td>'
+                f'<td style="text-align:center;color:{cat_color};background:{cat_bg};'
+                f'border-radius:4px;font-size:0.85em;">{html.escape(t.category)}</td>'
+                f'<td style="text-align:center;color:{conf_color};background:{conf_bg};'
+                f'border-radius:4px;font-weight:bold;">{t.confidence:.2f}</td>'
+                f"<td><code>{genes_str}</code></td>"
+                f'<td style="font-size:0.85em;color:#555;">{db_cell}</td>'
+                f"</tr>"
+            )
+
+        table_style = (
+            "border-collapse:collapse;width:100%;font-family:sans-serif;font-size:0.9em;"
+        )
+        th_style = (
+            "background:#2c3e50;color:white;padding:8px 12px;"
+            "text-align:left;border:1px solid #ddd;"
+        )
+        td_style = "padding:7px 12px;border:1px solid #ddd;vertical-align:top;"
+
+        return f"""
+<div style="font-family:sans-serif;">
+  <p style="margin:4px 0 8px 0;font-size:0.85em;color:#666;">{context_line}</p>
+  <style>
+    .cta-deconv th {{ {th_style} }}
+    .cta-deconv td {{ {td_style} }}
+    .cta-deconv tr:nth-child(even) td {{ background:#f8f9fa; }}
+  </style>
+  <table class="cta-deconv" style="{table_style}">
+    <thead>{header}</thead>
+    <tbody>{"".join(rows_html)}</tbody>
+  </table>
+</div>
+""".strip()
 
 
 def _confidence_color(conf: float) -> str:
