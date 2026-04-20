@@ -2,6 +2,9 @@
 
 **Claude-powered cell type annotation for single-cell and spatial genomics**
 
+![celltype-agent](docs/social-preview.png)
+
+
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-50%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
