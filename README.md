@@ -53,52 +53,30 @@ PBMC3k dataset, 8 Leiden clusters:
 
 ## Architecture
 
-```
-User input (.h5ad)
-       │
-       ▼
-┌──────────────────────────────────────────────────────────┐
-│  core.py: annotate() / annotate_spatial()                │
-│                                                          │
-│  ┌─────────────┐   ┌──────────────────┐                  │
-│  │ markers.py  │   │ deconvolution.py │                  │
-│  │ extract_    │   │ run_lda()        │                  │
-│  │ markers()   │   │ auto-K (perp.)   │                  │
-│  └──────┬──────┘   └────────┬─────────┘                  │
-│         │  cluster→genes    │  topic→(gene,weight)       │
-│         └──────────┬────────┘                            │
-│                    ▼                                      │
-│  ┌─────────────────────────────────────┐                 │
-│  │  agent.py: annotate_clusters() /    │                 │
-│  │            annotate_topics()        │                 │
-│  │                                     │                 │
-│  │  Claude claude-opus-4-6             │                 │
-│  │  + adaptive thinking                │                 │
-│  │  + streaming                        │                 │
-│  │                                     │                 │
-│  │  Tool calls:                        │                 │
-│  │  ┌──────────────────────────────┐   │                 │
-│  │  │ search_by_celltype(ct,sp)    │◄──┤ local dispatch  │
-│  │  │ search_by_gene(gene,sp)      │◄──┤ no network      │
-│  │  │ record_cell_type / topic     │   │                 │
-│  │  └──────────────────────────────┘   │                 │
-│  │           │                         │                 │
-│  │           ▼                         │                 │
-│  │  knowledge.py                       │                 │
-│  │  PanglaoDB (8,286 entries)          │                 │
-│  │  CellMarker 2.0 (96,075 entries)    │                 │
-│  └─────────────────────────────────────┘                 │
-└──────────────────────────────────────────────────────────┘
-       │
-       ▼
-AnnotationResult / DeconvolutionResult  (Pydantic)
-       │
-       ├── to_labels()       dict[cluster→type]
-       ├── to_dataframe()    pandas DataFrame
-       ├── to_csv()          CSV file
-       ├── to_narrative()    LLM-generated methods prose
-       ├── to_methods()      citable methods paragraph
-       └── _repr_html_()     Jupyter notebook table
+```mermaid
+flowchart TD
+    A[Input\n.h5ad AnnData] --> B{Data type?}
+    B -->|scRNA-seq| C[core.py\nannotate]
+    B -->|Spatial| D[core.py\nannotate_spatial]
+    
+    C --> E[markers.py\nextract_markers\ncluster to genes]
+    D --> F[deconvolution.py\nrun_lda\nauto-K via perplexity]
+    
+    E --> G[agent.py\nannotate_clusters]
+    F --> G2[agent.py\nannotate_topics]
+    
+    G --> H[Claude claude-opus-4-6\nadaptive thinking + streaming]
+    G2 --> H
+    
+    H -->|Tool calls| I[knowledge.py\nPanglaoDB 8,286 entries\nCellMarker 2.0 96,075 entries]
+    I -->|search_by_celltype\nsearch_by_gene| H
+    
+    H --> J[AnnotationResult\nDeconvolutionResult\nPydantic models]
+    
+    J --> K1[to_labels\ndict]
+    J --> K2[to_dataframe\npandas]
+    J --> K3[to_narrative\nLLM methods prose]
+    J --> K4[_repr_html_\nJupyter table]
 ```
 
 ---
